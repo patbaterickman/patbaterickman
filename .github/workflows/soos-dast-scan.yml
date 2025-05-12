@@ -1,0 +1,128 @@
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+#
+# SOOS is the easy-to-integrate and affordable software security solution for your whole team.
+#
+# Learn more at https://soos.io/
+#
+# To use this action, perform the following steps:
+#
+# 1. Create an account on https://app.soos.io. SOOS offers a free 30 day trial for our SCA, DAST, and SBOM products.
+#
+# 2. Navigate to the "Integrate" page in the SOOS app (https://app.soos.io/integrate/dast/). Note the "API Credentials" section of this page; the keys you will need for the next step are here.
+#
+# 3. Set up your SOOS API Key and SOOS Client Id as Github Secrets named SOOS_API_KEY and SOOS_CLIENT_ID.
+#
+# 4. (Optional) If you'd like to upload SARIF results of DAST scans to GitHub, set SOOS_GITHUB_PAT with your Github Personal Access Token.
+#
+#  Check for the latest version here: https://github.com/marketplace/actions/soos-dast
+
+name: Security Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '0 0 * * *' # Daily security scans
+
+env:
+  DOTNET_VERSION: '6.0.x'
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+jobs:
+  security_checks:
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    name: Comprehensive Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+    # Checkout code
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Needed for SonarQube analysis
+
+    # Set up .NET Core
+    - name: Setup .NET Core SDK
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    # Dependency vulnerability scanning
+    - name: Run OWASP Dependency Check
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: 'YourProject'
+        format: 'SARIF'
+        fail_on_cvss: 7.0
+        scan_target: '.'
+
+    # SAST with CodeQL
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: 'csharp'
+        queries: security-extended,security-and-quality
+
+    - name: Build project (needed for CodeQL)
+      run: dotnet build YourSolution.sln
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v2
+
+    # DAST with SOOS
+    - name: Run SOOS DAST Analysis
+      uses: soos-io/soos-dast-action@main
+      with:
+        client_id: ${{ secrets.SOOS_CLIENT_ID }}
+        api_key: ${{ secrets.SOOS_API_KEY }}
+        project_name: "YourProject"
+        scan_mode: "baseline"
+        target_url: "https://www.example.com/"
+        export_format: "Sarif"
+        export_file_type: "Json"
+
+    # Process SARIF files
+    - name: Process and Upload Security Reports
+      run: |
+        # Process SOOS report
+        soos_file=$(find . -name "*.sarif.json" | head -n 1)
+        [ -n "$soos_file" ] && mv "$soos_file" soos-output.sarif.json
+        
+        # Process Dependency Check report
+        depcheck_file=$(find . -name "dependency-check-report.sarif" | head -n 1)
+        [ -n "$depcheck_file" ] && mv "$depcheck_file" dependency-check-output.sarif
+        
+        # Upload all reports
+        echo "Reports processed for upload"
+
+    - name: Upload Security Reports
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: |
+          soos-output.sarif.json
+          dependency-check-output.sarif
+        checkout_path: ${{ github.workspace }}
+
+    # Secrets scanning
+    - name: Detect Secrets
+      uses: gitleaks/gitleaks-action@v2
+      with:
+        config-path: .gitleaks.toml
+        redact: true
+
+    # Container scanning (if applicable)
+    - name: Scan for Container Vulnerabilities
+      if: startsWith(github.event.repository.owner.login, 'docker-')
+      uses: anchore/scan-action@v3
+      with:
+        image-reference: 'your-image:latest'
+        fail-build: true
+        severity-cutoff: 'high'
